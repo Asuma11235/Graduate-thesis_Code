@@ -1,5 +1,20 @@
 #!/usr/bin/env Rscript
 
+# ============================================================
+# Pseudo-bulk CPM Calculator & Visualizer
+#
+# Description:
+#   Calculates "Pseudo-bulk" CPM (Counts Per Million) for a specific target gene
+#   across multiple Seurat RDS datasets.
+#   - Aggregates counts across all cells in each dataset.
+#   - Normalizes by total library size.
+#   - handles Seurat v4/v5 assay structure differences.
+#   - Provides a fallback approximation if raw counts are missing.
+#
+# Output:
+#   - Bar plot (PDF) comparing CPM across datasets.
+# ============================================================
+
 suppressPackageStartupMessages({
   library(Seurat)
   library(Matrix)
@@ -7,43 +22,62 @@ suppressPackageStartupMessages({
 })
 
 # =========================
-# 入力設定
+# 1) Configuration
 # =========================
-inputs <- list(
-  leaf   = "/Users/ryo/Desktop/scAtlas/S3_leaf_rename.slim.RDS",
-  stem   = "/Users/ryo/Desktop/scAtlas/stem_rename.slim.RDS",
-  root   = "/Users/ryo/Desktop/scAtlas/D11_root_rename.slim.RDS",
-  flower = "/Users/ryo/Desktop/scAtlas/Middle_flower_rename.slim.RDS"
+
+# Input datasets (Label = File Path)
+# NOTE: Update paths to match your directory structure.
+INPUTS <- list(
+  leaf   = "./input_data/Leaf_scRNA.RDS",
+  stem   = "./input_data/Stem_scRNA.RDS",
+  root   = "./input_data/Root_scRNA.RDS",
+  flower = "./input_data/Flower_scRNA.RDS"
 )
+
+# Target Gene ID (AGI code or Symbol)
 TARGET_GENE <- "AT1G63720"
 
-OUTDIR <- file.path("/Users/ryo/Desktop/scAtlas", "pseudobulk_out")
+# Output Settings
+OUTDIR <- "./results_pseudobulk"
 dir.create(OUTDIR, showWarnings = FALSE, recursive = TRUE)
 OUTPDF <- file.path(OUTDIR, paste0(TARGET_GENE, "_pseudoBulk_CPM_bar.pdf"))
 
 # =========================
-# 共通ユーティリティ
+# 2) Helper Functions
 # =========================
+
+# Null coalescing operator
 `%||%` <- function(a, b) if (!is.null(a)) a else b
+
+# Safe nnzero function
 nnz <- function(m) tryCatch(Matrix::nnzero(m), error = function(e) NA_integer_)
 
-# v5/v4 互換ラッパー
-GA <- function(x, assay = NULL, layer = c("counts","data","scale.data")) {
+# Wrapper for Seurat v4/v5 compatibility (GetAssayData)
+get_assay_data_safe <- function(x, assay = NULL, layer = c("counts", "data", "scale.data")) {
   layer <- match.arg(layer)
+  
+  # Try v5 syntax (layer) first
   ok <- try({
-    return(GetAssayData(x, assay = assay %||% DefaultAssay(x), layer = layer))
+    return(Seurat::GetAssayData(x, assay = assay %||% Seurat::DefaultAssay(x), layer = layer))
   }, silent = TRUE)
+  
   if (!inherits(ok, "try-error")) return(ok)
-  slot <- switch(layer, counts="counts", data="data", "scale.data"="scale.data")
-  GetAssayData(x, assay = assay %||% DefaultAssay(x), slot = slot)
+  
+  # Fallback to v4 syntax (slot)
+  slot <- switch(layer, counts = "counts", data = "data", "scale.data" = "scale.data")
+  Seurat::GetAssayData(x, assay = assay %||% Seurat::DefaultAssay(x), slot = slot)
 }
 
-choose_best_assay <- function(x, prefer = c("RNA","SCT","integrated","Spatial")) {
-  asy <- Assays(x)
+# Automatically select the best assay containing data
+choose_best_assay <- function(x, prefer = c("RNA", "SCT", "integrated", "Spatial")) {
+  asy <- Seurat::Assays(x)
+  # Prioritize preferred assays, then check others
   ord <- unique(c(intersect(prefer, asy), setdiff(asy, prefer)))
+  
   for (a in ord) {
-    cnt <- tryCatch(GA(x, assay = a, layer = "counts"), error = function(e) NULL)
-    dat <- tryCatch(GA(x, assay = a, layer = "data"),   error = function(e) NULL)
+    cnt <- tryCatch(get_assay_data_safe(x, assay = a, layer = "counts"), error = function(e) NULL)
+    dat <- tryCatch(get_assay_data_safe(x, assay = a, layer = "data"),   error = function(e) NULL)
+    
     if (!is.null(cnt) && !is.na(nnz(cnt)) && nnz(cnt) > 0) return(a)
     if (!is.null(dat) && !is.na(nnz(dat)) && nnz(dat) > 0) return(a)
   }
@@ -51,82 +85,99 @@ choose_best_assay <- function(x, prefer = c("RNA","SCT","integrated","Spatial"))
 }
 
 # =========================
-# 純バルク風CPM計算（1オブジェクト）
+# 3) Pseudo-bulk Calculation
 # =========================
-pseudobulk_cpm_for_gene <- function(obj, gene_id, prefer_assay = c("RNA","SCT","integrated","Spatial")) {
+
+calc_pseudobulk_cpm <- function(obj, gene_id, prefer_assay = c("RNA", "SCT", "integrated", "Spatial")) {
   stopifnot(inherits(obj, "Seurat"))
-  DefaultAssay(obj) <- choose_best_assay(obj, prefer = prefer_assay)
+  Seurat::DefaultAssay(obj) <- choose_best_assay(obj, prefer = prefer_assay)
   
-  # gene行の特定（大文字合わせ）
+  # Identify gene row (case-insensitive matching)
   rn <- rownames(obj)
   gid <- toupper(gene_id)
   if (!(gid %in% toupper(rn))) {
-    stop(sprintf("対象遺伝子が見つかりません: %s", gene_id))
+    stop(sprintf("Target gene not found: %s", gene_id))
   }
-  # 実際の行名（大文字照合→元の表記へ）
+  
+  # Retrieve actual row name
   gene_rowname <- rn[match(gid, toupper(rn))]
   
-  # まず counts を使う（真のバルク風）
-  cnt <- GA(obj, layer = "counts")
+  # Strategy 1: Use raw counts (True pseudo-bulk)
+  cnt <- get_assay_data_safe(obj, layer = "counts")
   if (!is.null(cnt) && !is.na(nnz(cnt)) && nnz(cnt) > 0) {
-    # 合算ライブラリサイズ
     lib_size <- sum(cnt)
-    if (lib_size <= 0) stop("counts は取得できたが合計が0です。")
+    if (lib_size <= 0) stop("Counts retrieved but total sum is 0.")
+    
     gene_sum <- sum(cnt[gene_rowname, , drop = TRUE])
     cpm <- 1e6 * as.numeric(gene_sum) / as.numeric(lib_size)
     return(list(cpm = cpm, source = "counts"))
   }
   
-  # フォールバック：data（LogNormalize想定）を近似的にcountへ戻す
-  warning("[fallback] counts が空のため data から近似CPMを計算します（expm1でカウント近似）")
-  dat <- GA(obj, layer = "data")
+  # Strategy 2: Fallback to 'data' slot (Approximation)
+  warning("[fallback] Counts slot empty. approximating CPM from 'data' slot (using expm1).")
+  dat <- get_assay_data_safe(obj, layer = "data")
   if (is.null(dat) || is.na(nnz(dat)) || nnz(dat) == 0) {
-    stop("counts も data も空です。")
+    stop("Both counts and data slots are empty.")
   }
-  # data は log1p(1e4 * count / lib_size_cell) などのため、厳密な逆変換はできないが、
-  # 可視化目的の近似として exmp1 を用いる
-  # 注意: ここでの lib_size_approx は全要素のexpm1合計
+  
+  # Approximation: Sum of expm1(data)
   gene_sum <- sum(expm1(dat[gene_rowname, , drop = TRUE]))
   lib_size <- sum(expm1(dat))
-  if (lib_size <= 0) stop("data近似の合計が0です。")
+  
+  if (lib_size <= 0) stop("Sum of expm1(data) is 0.")
+  
   cpm <- 1e6 * as.numeric(gene_sum) / as.numeric(lib_size)
   return(list(cpm = cpm, source = "data(approx)"))
 }
 
 # =========================
-# 全データを回してCPM表を作成
+# 4) Main Execution
 # =========================
-vals <- lapply(names(inputs), function(series) {
-  p <- inputs[[series]]
+
+message("Starting Pseudo-bulk CPM calculation...")
+
+vals <- lapply(names(INPUTS), function(series) {
+  p <- INPUTS[[series]]
+  message("Processing: ", series, " (", basename(p), ")")
+  
   obj <- readRDS(p)
-  res <- pseudobulk_cpm_for_gene(obj, TARGET_GENE)
-  data.frame(Series = series, Gene = TARGET_GENE,
-             CPM = res$cpm, Source = res$source, stringsAsFactors = FALSE)
+  res <- calc_pseudobulk_cpm(obj, TARGET_GENE)
+  
+  data.frame(
+    Series = series,
+    Gene = TARGET_GENE,
+    CPM = res$cpm,
+    Source = res$source,
+    stringsAsFactors = FALSE
+  )
 })
+
 df <- do.call(rbind, vals)
 
-# 数値をログ化した見やすい軸にしたい場合は以下の列を使う（今回は生CPMを描画）
+# Optional: To use Log scale, uncomment below
 # df$log1pCPM <- log1p(df$CPM)
 
 # =========================
-# プロット & 保存
+# 5) Plotting & Saving
 # =========================
+
 p <- ggplot(df, aes(x = Series, y = CPM, fill = Series)) +
   geom_col(width = 0.7) +
   theme_bw(base_size = 12) +
-  theme(panel.grid.minor = element_blank(),
-        legend.position = "none",
-        axis.text.x = element_text(angle = 15, hjust = 1)) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "none",
+    axis.text.x = element_text(angle = 15, hjust = 1)
+  ) +
   labs(
     title = sprintf("Pseudo-bulk CPM of %s", TARGET_GENE),
-    x = "Series (dataset)",
+    x = "Dataset",
     y = "CPM (counts per million)",
-    caption = "Counts summed across all cells per dataset, then library-size normalized (CPM)."
+    caption = "Counts summed across all cells per dataset, then library-size normalized."
   )
 
 ggsave(OUTPDF, p, width = 6.5, height = 4.5, units = "in", limitsize = FALSE)
 
-message("=== Pseudo-bulk CPM ===")
+message("\n=== Pseudo-bulk CPM Results ===")
 print(df)
-message("Saved PDF: ", normalizePath(OUTPDF))
-
+message("\nSaved PDF: ", normalizePath(OUTPDF))
