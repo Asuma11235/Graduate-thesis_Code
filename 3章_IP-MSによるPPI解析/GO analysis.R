@@ -1,12 +1,10 @@
-
-
 #!/usr/bin/env Rscript
 
 # ============================================================
-# GO enrichment 可視化 拡張版（白背景・堅牢化・デバッグ付き）
-#  - enrichGO + bar
-#  - (A) GOplot: GOBubble（不能時は dotplot 代替）/ GOChord（堅牢化）
-#  - (B) GO階層ツリー（sig内の親子） + （任意）enrichplot::goplot DAG
+# GO Enrichment Visualization
+#  - enrichGO + barplot
+#  - (A) GOplot: GOBubble (with dotplot fallback) / GOChord (robust version)
+#  - (B) GO Hierarchical Tree (Parent-child relations) + enrichplot DAG
 # ============================================================
 
 # ---------------------------
@@ -32,24 +30,26 @@ install_if_missing(c(
   "clusterProfiler","DOSE","enrichplot","org.At.tair.db","AnnotationDbi","GO.db"
 ), bioc=TRUE)
 
-# 白背景を全体のデフォルトに
+# Set white background as default
 ggplot2::theme_set(ggplot2::theme_bw(base_size = 11))
 
-# --- 保存を堅牢化するユーティリティ（ggsave フォールバック＋ログ） ---
+# --- Robust Save Utility (ggsave fallback + logging) ---
 safe_save_png <- function(path, plot, width=7, height=6, dpi=300, bg="white"){
   dir.create(dirname(path), showWarnings=FALSE, recursive=TRUE)
   ok <- TRUE
-  # まず ggsave を試す（環境によりこれで十分）
+  # Try ggsave first
   tryCatch({
     ggplot2::ggsave(filename = path, plot = plot, width = width, height = height, dpi = dpi,
                     device = function(...) grDevices::png(..., bg = bg))
   }, error=function(e){ ok <<- FALSE; message("[save] ggsave failed: ", e$message) })
+  
   if (ok && file.exists(path)) {
     sz <- try(file.info(path)$size, silent=TRUE)
     message("[save] ggsave OK: ", path, " (", ifelse(inherits(sz,"try-error")||is.na(sz),"?", sz), " bytes)")
     return(invisible(TRUE))
   }
-  # フォールバック：明示的にデバイスを開く
+  
+  # Fallback: Open device explicitly
   message("[save] fallback device path: ", path)
   devok <- FALSE
   if (requireNamespace("Cairo", quietly=TRUE)) {
@@ -70,6 +70,7 @@ safe_save_png <- function(path, plot, width=7, height=6, dpi=300, bg="white"){
   }
   print(plot)
   grDevices::dev.off()
+  
   if (file.exists(path)) {
     sz <- try(file.info(path)$size, silent=TRUE)
     message("[save] fallback OK: ", path, " (", ifelse(inherits(sz,"try-error")||is.na(sz),"?", sz), " bytes)")
@@ -80,44 +81,44 @@ safe_save_png <- function(path, plot, width=7, height=6, dpi=300, bg="white"){
 }
 
 ggsave_white <- function(filename, plot, width=7, height=6, dpi=300){
-  # （既存関数は互換維持。内部は safe_save_png に委譲）
+  # Wrapper for compatibility
   safe_save_png(filename, plot, width=width, height=height, dpi=dpi, bg="white")
 }
 
 # ---------------------------
 # 1) Settings
 # ---------------------------
-IN_XLSX   <- "/Users/ryo/Downloads/251108_CoIP.xlsx"
-SHEETS    <- c("DMSO","bikinin","BR-up","BR-down", "Col-up", "Col-down")
-OUT_DIR   <- "251108_xlsxglobal_final_!!"; dir.create(OUT_DIR, showWarnings=FALSE, recursive=TRUE)
+IN_XLSX   <- "./input_data/dataset.xlsx" # Generic path
+SHEETS    <- c("Treatment_A", "Treatment_B", "Control_Up", "Control_Down") # Generic sheet names
+OUT_DIR   <- "Results_GO_Analysis"; dir.create(OUT_DIR, showWarnings=FALSE, recursive=TRUE)
 
 GO_ONTOLOGY  <- "CC"      # "BP" / "MF" / "CC"
 PV_CUTOFF    <- 0.05
 QV_CUTOFF    <- 0.05
 
-USE_QUANTILE <- TRUE       # TRUE: 分位, FALSE: 固定閾値
+USE_QUANTILE <- TRUE      # TRUE: Quantile, FALSE: Fixed threshold
 TOP_PCT      <- 100
 ABS_CUTOFF   <- 0.1
 
 COL_SYM  <- "SYMBOL"
 COL_LFC  <- "Log2FC"
 
-DRAW_DAG <- TRUE   # enrichplot::goplot を出すか
+DRAW_DAG <- TRUE   # Whether to draw enrichplot::goplot
 
-# ★★ 新規: 背景選択モード ★★
-# "sheet"          : 既存の挙動（当該シートでTAIRにマップできた全遺伝子）
-# "global"         : org.At.tair.db に存在する全 TAIR を背景
-# "excel_universe" : IN_XLSX 内 "universe" シートの SYMBOL 列から作る背景
+# Background selection mode
+# "sheet"          : All genes mapped to TAIR in the specific sheet
+# "global"         : All TAIR IDs in org.At.tair.db
+# "excel_universe" : All SYMBOLs in the "universe" sheet of IN_XLSX
 
-BG_MODE <- "excel_universe"  # ← "sheet" / "global" / "excel_universe"
+BG_MODE <- "excel_universe"  # "sheet" / "global" / "excel_universe"
 
-UNIVERSE_SHEET_NAME <- "universe"  # excel_universe モードで使うシート名
-UNIVERSE_SYMBOL_COL <- "SYMBOL"    # universe シート内の列名
+UNIVERSE_SHEET_NAME <- "universe"  # Sheet name for excel_universe mode
+UNIVERSE_SYMBOL_COL <- "SYMBOL"    # Column name in universe sheet
 
 # ---------------------------
-# 2) Helpers（※既存の関数は流用）
+# 2) Helpers
 # ---------------------------
-# ---- 可視化の自動スケール用（線形マップ＋クリップ） ----
+# ---- Automatic scaling (linear map + clip) ----
 .map_linear <- function(x, from_min, from_max, to_min, to_max) {
   if (is.na(x) || !is.finite(x)) return((to_min + to_max)/2)
   x <- max(from_min, min(from_max, x))
@@ -125,13 +126,14 @@ UNIVERSE_SYMBOL_COL <- "SYMBOL"    # universe シート内の列名
   to_min + r * (to_max - to_min)
 }
 
-
 clean_chr <- function(x){
   x <- as.character(x); x <- trimws(x); x[x==""] <- NA; x
 }
+
 extract_agi_anycase <- function(x){
   stringr::str_extract(toupper(as.character(x)), "AT[1-5MC]G\\d{5}")
 }
+
 map_symbol_to_tair_any <- function(sym_or_alias_vec){
   k <- unique(stats::na.omit(toupper(trimws(sym_or_alias_vec))))
   if (length(k) == 0) return(setNames(character(0), character(0)))
@@ -152,12 +154,12 @@ map_symbol_to_tair_any <- function(sym_or_alias_vec){
   m
 }
 
-# enrichGO（軽いデバッグ出力のみ追加）
+# enrichGO (with lightweight debug output)
 run_enrichGO_TAIR <- function(genes_tair, universe_tair, label){
   genes_tair <- unique(genes_tair[!is.na(genes_tair) & genes_tair!=""])
   message(sprintf("[%s] input=%d, universe=%d", label, length(genes_tair), length(universe_tair)))
   if (length(genes_tair) < 5L){
-    message(sprintf("[%s] 入力遺伝子が少ないためスキップ (%d genes).", label, length(genes_tair)))
+    message(sprintf("[%s] Skipping due to too few input genes (%d genes).", label, length(genes_tair)))
     return(NULL)
   }
   ego <- tryCatch({
@@ -176,7 +178,7 @@ run_enrichGO_TAIR <- function(genes_tair, universe_tair, label){
     message(sprintf("[%s] enrichGO error: %s", label, e$message)); NULL
   })
   if (is.null(ego) || nrow(as.data.frame(ego))==0){
-    message(sprintf("[%s] 有意ヒットなし。", label)); return(NULL)
+    message(sprintf("[%s] No significant hits.", label)); return(NULL)
   }
   message(sprintf("[%s] enrichGO: %d rows", label, nrow(as.data.frame(ego))))
   ego
@@ -204,14 +206,14 @@ plot_bar_save <- function(ego, title, out_png){
       panel.grid.minor = ggplot2::element_blank(),
       panel.border     = ggplot2::element_rect(color="black", fill=NA)
     )
-  safe_save_png(out_png, p, width=6, height=4, dpi=300)  # ← ggsave を堅牢保存に置換
+  safe_save_png(out_png, p, width=6, height=4, dpi=300)
 }
 
-# ---- GOplot 前処理（circle_dat 入力）
+# ---- GOplot Preprocessing (Input for circle_dat) ----
 diagnose_circ <- function(terms, genes){
   g_in_terms <- unique(unlist(strsplit(terms$genes, ",\\s*")))
   hit <- intersect(g_in_terms, genes$ID)
-  message(sprintf("[GOplot] terms側の遺伝子数: %d / genesテーブルID数: %d / 一致数: %d",
+  message(sprintf("[GOplot] Genes in terms: %d / Genes in table: %d / Overlap: %d",
                   length(g_in_terms), nrow(genes), length(hit)))
 }
 
@@ -224,7 +226,7 @@ prep_GOplot_inputs <- function(ego, de_df, ontology_tag){
       category = ontology_tag,
       ID       = .data$ID,
       term     = .data$Description,
-      genes    = gsub("/", ", ", .data$geneID),   # TAIR をカンマ列挙
+      genes    = gsub("/", ", ", .data$geneID),  # Comma-separated TAIR IDs
       adj_pval = .data$p.adjust
     )
   
@@ -249,27 +251,27 @@ prep_GOplot_inputs <- function(ego, de_df, ontology_tag){
   list(terms=terms, genes=genes, circ=circ)
 }
 
-# ---- GOplot 出力（Bubbleは代替dotplot、Chordは circlize で安定出力＋ラベル付き）
+# ---- GOplot Output (Bubble fallback, Stable Chord with labels) ----
 save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
-  # 代替Bubble
+  # Alternative Bubble plot
   save_alt_dotplot <- function(ego_obj, stub){
     if (is.null(ego_obj)) return(invisible(NULL))
     egodf <- as.data.frame(ego_obj); if (!NROW(egodf)) return(invisible(NULL))
     p_alt <- enrichplot::dotplot(ego_obj, showCategory = min(15, nrow(egodf))) +
       ggplot2::theme_bw(base_size=12)
     safe_save_png(paste0(stub, "_GOplot_Bubble_alt_dotplot.png"), p_alt, width=7, height=6, dpi=300)
-    message("[GOplot] Bubble 代替: dotplot を出力 → ", paste0(stub, "_GOplot_Bubble_alt_dotplot.png"))
+    message("[GOplot] Bubble alt: Outputting dotplot -> ", paste0(stub, "_GOplot_Bubble_alt_dotplot.png"))
   }
   
   # ===== Bubble =====
   if (is.null(circ) || !NROW(circ)) {
-    message("[GOplot] circ が空 → Bubble代替")
+    message("[GOplot] circ is empty -> Bubble alt")
     save_alt_dotplot(ego, out_stub)
   } else {
     n_pos <- sum(suppressWarnings(as.numeric(circ$logFC)) > 0, na.rm=TRUE)
     n_neg <- sum(suppressWarnings(as.numeric(circ$logFC)) < 0, na.rm=TRUE)
     if (n_pos == 0 || n_neg == 0) {
-      message(sprintf("[GOplot] 片側のみ (pos=%d, neg=%d) → Bubble代替", n_pos, n_neg))
+      message(sprintf("[GOplot] One-sided only (pos=%d, neg=%d) -> Bubble alt", n_pos, n_neg))
       save_alt_dotplot(ego, out_stub)
     } else {
       lab_n <- max(0, min(5, nrow(circ)))
@@ -283,17 +285,17 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
     }
   }
   
-  # ===== Chord（ID整合+頻度優先で sel を作る 安定版）=====
-  if (is.null(circ) || !NROW(circ)) { message("[GOplot] circ 空 → Chord スキップ"); return(invisible(NULL)) }
+  # ===== Chord (Stable version: ID matching + Frequency priority) =====
+  if (is.null(circ) || !NROW(circ)) { message("[GOplot] circ is empty -> Skip Chord"); return(invisible(NULL)) }
   
   gene_col <- if ("genes" %in% names(circ)) "genes" else if ("gene" %in% names(circ)) "gene" else NA_character_
-  if (is.na(gene_col)) { message("[GOplot] circ に gene 列が無い → Chord スキップ"); return(invisible(NULL)) }
+  if (is.na(gene_col)) { message("[GOplot] No gene column in circ -> Skip Chord"); return(invisible(NULL)) }
   
-  # 1) circ に現れる gene リスト（これを絶対基準にする）
+  # 1) Gene list in circ (Absolute reference)
   genes_in_circ <- unique(toupper(as.character(circ[[gene_col]])))
   genes_in_circ <- genes_in_circ[!is.na(genes_in_circ) & nzchar(genes_in_circ)]
   
-  # 2) logFC テーブル（de_df があれば補完）。キーは "GENE" = 大文字揃え
+  # 2) logFC table
   de_tbl <- NULL
   if (!is.null(de_df)) {
     de_tbl <- de_df %>%
@@ -303,16 +305,16 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
       dplyr::distinct(GENE, .keep_all = TRUE)
   }
   
-  # 3) gene の term 出現頻度
+  # 3) Gene term frequency
   freq_tbl <- circ %>%
     dplyr::mutate(GENE = toupper(as.character(.data[[gene_col]]))) %>%
     dplyr::filter(!is.na(GENE) & nzchar(GENE)) %>%
     dplyr::count(GENE, name = "freq")
   
-  # 4) sel 候補
+  # 4) Selection candidates
   sel_pool <- freq_tbl$GENE
   
-  # 5) sel のスコア = (頻度, |logFC|)
+  # 5) Selection score = (Frequency, |logFC|)
   if (!is.null(de_tbl)) {
     sel_df <- freq_tbl %>%
       dplyr::left_join(de_tbl, by = c("GENE")) %>%
@@ -322,14 +324,14 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
   }
   sel_df <- sel_df %>% dplyr::arrange(dplyr::desc(freq), dplyr::desc(absLFC), GENE)
   sel <- utils::head(sel_df$GENE, 20L)
-  if (length(sel) < 2L) { message("[GOplot] 候補遺伝子 < 2 → Chord スキップ"); return(invisible(NULL)) }
+  if (length(sel) < 2L) { message("[GOplot] Candidates < 2 -> Skip Chord"); return(invisible(NULL)) }
   
   # 6) chdat
   chdat <- tryCatch(GOplot::chord_dat(circ, genes = sel),
                     error=function(e){ message("[chord_dat] ", e$message); NULL })
-  if (is.null(chdat) || !NROW(chdat)) { message("[GOplot] chord_dat が空 → Chord スキップ"); return(invisible(NULL)) }
+  if (is.null(chdat) || !NROW(chdat)) { message("[GOplot] chord_dat is empty -> Skip Chord"); return(invisible(NULL)) }
   
-  # 7) 行名・列名の安全取得
+  # 7) Safe retrieval of row/col names
   rn <- rownames(chdat)
   if (!length(rn) || anyNA(rn) || any(rn=="")) {
     first_col <- if (ncol(chdat) >= 1) chdat[[1]] else NULL
@@ -338,14 +340,14 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
   if (!length(rn) || length(rn) != nrow(chdat)) rn <- paste0("gene_", seq_len(nrow(chdat)))
   cn <- colnames(chdat)
   term_cols <- if (ncol(chdat) >= 2) 2:ncol(chdat) else integer(0)
-  if (!length(term_cols)) { message("[circlize] term 列が見つからない → スキップ"); return(invisible(NULL)) }
+  if (!length(term_cols)) { message("[circlize] term columns not found -> Skip"); return(invisible(NULL)) }
   tn <- cn[term_cols]; if (!length(tn)) tn <- paste0("term_", seq_along(term_cols))
   
   mat0 <- suppressWarnings(as.matrix(chdat[, term_cols, drop=FALSE]))
   storage.mode(mat0) <- "numeric"; mat0[is.na(mat0)] <- 0
   
   idx <- which(mat0 > 0, arr.ind = TRUE)
-  if (!nrow(idx)) { message("[circlize] リンクなし（sel と term の交差=0） → sel の決め方を再検討"); return(invisible(NULL)) }
+  if (!nrow(idx)) { message("[circlize] No links (intersection=0) -> Reconsider selection logic"); return(invisible(NULL)) }
   
   edges_df <- data.frame(
     gene   = rn[idx[,"row"]],
@@ -359,7 +361,7 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
   message("[Chord-debug] terms: ", length(tn))
   message("[Chord-debug] edges: ", nrow(idx))
   
-  # ラベルの用意
+  # Prepare Labels
   genes_sectors <- unique(edges_df$gene)
   terms_sectors <- unique(edges_df$term)
   
@@ -404,7 +406,7 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
   label_map <- c(setNames(gene_labels_wrapped, genes_sectors),
                  setNames(term_labels_wrapped, terms_sectors))
   
-  # === circlize描画：デバイス堅牢化＋詳細ログ（既存のまま） ===
+  # === circlize Drawing: Robust Device + Logging ===
   f_png2 <- paste0(out_stub, "_GOplot_Chord_alt_circlize.png")
   message(sprintf("[circlize] sectors: genes=%d / terms=%d; edges=%d",
                   length(unique(edges_df$gene)), length(unique(edges_df$term)), nrow(edges_df)))
@@ -416,18 +418,18 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
       try({
         Cairo::CairoPNG(filename = path, width = 9*300, height = 6*300, dpi = 300)
         ok <<- TRUE
-        message("[device] Cairo::CairoPNG でオープン")
+        message("[device] Cairo::CairoPNG opened")
       }, silent = FALSE)
       if (ok) return(invisible(TRUE))
     }
     try({
       grDevices::png(path, width = 9*300, height = 6*300, res = 300, type = "cairo-png")
       ok <<- TRUE
-      message("[device] png(type='cairo-png') でオープン")
+      message("[device] png(type='cairo-png') opened")
     }, silent = FALSE)
     if (ok) return(invisible(TRUE))
     grDevices::png(path, width = 9*300, height = 6*300, res = 300)
-    message("[device] png(通常) でオープン")
+    message("[device] png(default) opened")
     invisible(TRUE)
   }
   
@@ -435,15 +437,15 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
   ok_draw <- TRUE
   try({
     circlize::circos.clear()
-    # ★ キャンバス余白と余裕を広げる
+    # Expand canvas margins and padding
     circlize::circos.par(
       gap.after = c(rep(2, length(unique(edges_df$gene)) - 1), 10,
                     rep(2, length(unique(edges_df$term)) - 1), 10),
-      track.margin = c(0.01, 0.04),                 # ★ 外側に少し広め（上側の余白）
-      cell.padding = c(0, 0, 0, 0),                 # ★ 余白の“謎の食い込み”防止
-      canvas.xlim = c(-1.06, 1.06),                 # ★ 左右に少しだけ拡張
-      canvas.ylim = c(-1.08, 1.12),                 # ★ 上側を広めに拡張（見切れ対策の本丸）
-      points.overflow.warning = FALSE               # ★ クリップ警告を抑制（挙動安定）
+      track.margin = c(0.01, 0.04),                 # Wider outer margins (top)
+      cell.padding = c(0, 0, 0, 0),                 # Prevent unexpected margin overlap
+      canvas.xlim = c(-1.06, 1.06),                 # Slight horizontal expansion
+      canvas.ylim = c(-1.08, 1.12),                 # Vertical expansion (fix clipping)
+      points.overflow.warning = FALSE               # Suppress clip warnings
     )
     
     circlize::chordDiagram(
@@ -454,26 +456,26 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
       transparency = 0.2,
       link.sort = TRUE,
       link.largest.ontop = TRUE,
-      preAllocateTracks = list(track.height = 0.18) # ★ ラベル用トラックを少し厚めに
+      preAllocateTracks = list(track.height = 0.18) # Thicker track for labels
     )
     
-    # ★ テキストを“外縁から2mm内側”に押し込んで描く（= 物理長さ基準）
+    # Draw text pushed inward by 2mm from the outer edge (physical length)
     circlize::circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {
       sector_name <- circlize::get.cell.meta.data("sector.index")
       xlim <- circlize::get.cell.meta.data("xlim")
       ylim <- circlize::get.cell.meta.data("ylim")
       lab <- label_map[[sector_name]]; if (is.null(lab)) lab <- sector_name
       
-      # 2mm をデータ座標へ変換（track.index=1 / 現在セルに対して）
+      # Convert 2mm to data coordinates
       inset <- circlize::convert_y(9.5, "mm", sector.index = sector_name, track.index = 1)
       
       circlize::circos.text(
         x = mean(xlim),
-        y = ylim[2] - inset,                         # ★ 外縁ぴったり→内側へ 2mm
+        y = ylim[2] - inset,                     # Outer edge -> inward 2mm
         labels = lab,
         facing = "clockwise",
         niceFacing = TRUE,
-        adj = c(0, 0.5),                             # ★ ベースライン中央寄せ
+        adj = c(0, 0.5),                         # Center baseline alignment
         cex = 0.6
       )
     })
@@ -483,20 +485,20 @@ save_GOplot_figs <- function(circ, out_stub, ego=NULL, de_df=NULL){
   
   
   if (!file.exists(f_png2)) {
-    message("[circlize] 出力PNGが存在しません: ", f_png2)
+    message("[circlize] Output PNG does not exist: ", f_png2)
   } else {
     sz <- try(file.info(f_png2)$size, silent = TRUE)
-    message("[circlize] 出力ファイル: ", f_png2, " / size=", if (inherits(sz, "try-error")) "NA" else as.character(sz), " bytes")
+    message("[circlize] Output file: ", f_png2, " / size=", if (inherits(sz, "try-error")) "NA" else as.character(sz), " bytes")
     if (!inherits(res_draw, "try-error") && !isTRUE(inherits(sz, "try-error")) && !is.na(sz) && sz > 2048) {
-      message("[circlize] OK: PNGサイズ十分（>2KB）")
+      message("[circlize] OK: PNG size sufficient (>2KB)")
     } else {
-      message("[circlize] 小さすぎ/描画エラーの可能性 → 上記ログのエラー/警告を確認してください")
+      message("[circlize] Too small/Draw error -> Check logs")
     }
   }
   invisible(NULL)
-}  # save_GOplot_figs()
+}
 
-# ---- (B) GO階層ツリー（sig内の親子のみでエッジ）
+# ---- (B) GO Hierarchical Tree (Edges only within significant terms) ----
 get_GO_parents <- function(go_ids, ontology=c("BP","MF","CC")){
   ontology <- match.arg(ontology)
   parents_map <- switch(ontology,
@@ -517,7 +519,7 @@ plot_go_sig_tree <- function(ego, title, out_png, ontology_tag){
   egodf <- as.data.frame(ego); if (!nrow(egodf)) return(invisible(NULL))
   sig_ids <- unique(egodf$ID); if (length(sig_ids) < 2L){ message("[tree] sig<2"); return(invisible(NULL)) }
   
-  # 親子（sig内のみ）
+  # Parent-child relationships
   parents_list <- get_GO_parents(sig_ids, ontology=ontology_tag)
   edges <- purrr::map2(sig_ids, parents_list, function(child, parents){
     if (!length(parents)) return(NULL)
@@ -525,7 +527,7 @@ plot_go_sig_tree <- function(ego, title, out_png, ontology_tag){
     if (!length(parents_in_sig)) return(NULL)
     tibble::tibble(from=parents_in_sig, to=child)
   }) %>% dplyr::bind_rows()
-  if (is.null(edges) || !nrow(edges)){ message("[tree] 親子なし"); return(invisible(NULL)) }
+  if (is.null(edges) || !nrow(edges)){ message("[tree] No parent-child relations found"); return(invisible(NULL)) }
   
   nodes <- egodf %>%
     dplyr::select(ID, Description, p.adjust, GeneRatio) %>%
@@ -533,37 +535,36 @@ plot_go_sig_tree <- function(ego, title, out_png, ontology_tag){
     dplyr::mutate(GeneRatioNum = sapply(GeneRatio, function(x) if (nzchar(x)) eval(parse(text=x)) else NA_real_)) %>%
     dplyr::rename(name=ID)
   
-  # ---- 量に応じた自動スケール ----
+  # ---- Auto-scaling based on data volume ----
   n_nodes <- nrow(nodes)
   n_edges <- nrow(edges)
   
-  lab_size   <- .map_linear(n_nodes,  10, 200, 12.0, 5.5)   # ノード数が多いほど文字小さく
-  node_size0 <- .map_linear(n_nodes,  1, 1000, 0.4, 0.4)   # 点自体の最小サイズ
-  edge_width <- .map_linear(n_edges,  20,2000, 2.4,0.5)  # エッジ本数が多いほど細く
-  edge_alpha <- .map_linear(n_edges,  20,2000, 0.80,0.25)  # 同上：透明度上げる
-  box_size   <- .map_linear(n_nodes,  10, 200, 0.30,0.15)  # ラベルボックス枠線
-  repel_force<- .map_linear(n_nodes,  10, 200,  1.0, 2.5)  # 混雑時に少し強めに弾く
+  lab_size   <- .map_linear(n_nodes,  10, 200, 12.0, 5.5)   # Smaller text for more nodes
+  node_size0 <- .map_linear(n_nodes,   1, 1000, 0.4, 0.4)   # Min point size
+  edge_width <- .map_linear(n_edges,  20,2000, 2.4,0.5)     # Thinner edges for more edges
+  edge_alpha <- .map_linear(n_edges,  20,2000, 0.80,0.25)   # Higher transparency for more edges
+  box_size   <- .map_linear(n_nodes,  10, 200, 0.30,0.15)   # Label box border
+  repel_force<- .map_linear(n_nodes,  10, 200,  1.0, 2.5)   # Increase repulsion for crowded plots
   
   g <- igraph::graph_from_data_frame(edges, directed=TRUE, vertices=nodes)
   
   p <- ggraph::ggraph(g, layout="tree") +
-    # エッジ（量に応じて幅/透明度調整）
+    # Edges
     ggraph::geom_edge_link(
       linewidth = edge_width, alpha = edge_alpha,
       arrow = grid::arrow(length=unit(3,"mm"), type="closed"),
       end_cap = ggraph::circle(2.5,'mm'), colour = "grey30"
     ) +
-    # ノード（点の下限サイズを与えて見失わないように）
+    # Nodes
     ggraph::geom_node_point(
       ggplot2::aes(size = pmax(GeneRatioNum, node_size0), alpha = -log10(p.adjust)),
       show.legend = FALSE
     ) +
-    # ラベル（フォントを量で可変。重なりは抑制しつつ極力残す）
+    # Labels
     ggraph::geom_node_label(
       ggplot2::aes(label = Description),
       size = lab_size, label.size = box_size, label.padding = unit(0.10, "lines"),
       fill = "white", colour = "black", segment.colour = "grey40",
-      # ggrepel由来の引数：混雑に応じて調整
       force = repel_force, max.overlaps = Inf
     ) +
     ggplot2::theme_bw(base_size = 10) +
@@ -580,20 +581,19 @@ plot_goplot_DAG <- function(ego, title, out_png){
   if (is.null(ego)) return(invisible(NULL))
   egodf <- as.data.frame(ego); if (!nrow(egodf)) return(invisible(NULL))
   
-  # ノード数＝有意語数（goplotはここが主な混雑要因）
+  # Number of nodes = significant terms
   n_nodes <- nrow(egodf)
-  base_text <- .map_linear(n_nodes, 10, 200, 5.5, 5.5)     # 図全体の文字
-  lab_size  <- .map_linear(n_nodes, 10, 200, 1.8, 2.0)  # ノードラベル
-  edge_w    <- .map_linear(n_nodes, 10, 200, 1.0, 0.3)  # エッジ線幅（近似）
-  edge_a    <- .map_linear(n_nodes, 10, 200, 0.8, 0.3)  # エッジ透明度
-  node_size0 <- .map_linear(n_nodes,  1, 1000, 0.4, 0.4)   # 点自体の最小サイズ
+  base_text <- .map_linear(n_nodes, 10, 200, 5.5, 5.5)
+  lab_size  <- .map_linear(n_nodes, 10, 200, 1.8, 2.0)
+  edge_w    <- .map_linear(n_nodes, 10, 200, 1.0, 0.3)
+  edge_a    <- .map_linear(n_nodes, 10, 200, 0.8, 0.3)
+  node_size0 <- .map_linear(n_nodes,  1, 1000, 0.4, 0.4)
   
   p <- tryCatch({
     enrichplot::goplot(ego, showCategory = min(30, n_nodes))
   }, error=function(e){ message("[goplot] ", e$message); NULL })
   if (is.null(p)) return(invisible(NULL))
   
-  # 可能なら edge 幅/透明度のスケールを付与（無視される場合もあり）
   suppressWarnings({
     p <- p +
       ggplot2::theme_bw(base_size = base_text) +
@@ -603,28 +603,24 @@ plot_goplot_DAG <- function(ego, title, out_png){
         legend.title= ggplot2::element_text(size = base_text)
       )
     
-    # 一部の enrichplot バージョンでは edge_* aesthetics が有効
     if (requireNamespace("ggraph", quietly = TRUE)) {
       p <- p +
         ggraph::scale_edge_width(range = c(edge_w, edge_w), guide = "none") +
         ggraph::scale_edge_alpha(range = c(edge_a, edge_a), guide = "none")
     }
     
-    # --- ノード点サイズの自動調整（n_nodes に応じて） ---
+    # --- Auto-adjustment of node point size ---
     node_min <- .map_linear(n_nodes, 10, 200, 3.5, 1.2)
     node_max <- .map_linear(n_nodes, 10, 200, 7.0, 2.0)
     
-    # size が「美術マッピング」されているレイヤがあるか判定（aes_evalは使わない）
     has_size_mapping <- any(vapply(p$layers, function(lyr) {
       nm <- tryCatch(names(lyr$mapping), error = function(e) character(0))
       "size" %in% nm
     }, logical(1)))
     
     if (has_size_mapping) {
-      # マッピングされているなら scale_size でレンジを制御
       p <- p + ggplot2::scale_size(range = c(node_min, node_max), guide = "none")
     } else {
-      # 固定サイズなら該当レイヤの size を直接上書き
       for (i in seq_along(p$layers)) {
         lyr <- p$layers[[i]]
         if (inherits(lyr$geom, "GeomPoint") || inherits(lyr$geom, "GeomNodePoint") || inherits(lyr$geom, "GeomCircle")) {
@@ -635,28 +631,23 @@ plot_goplot_DAG <- function(ego, title, out_png){
       }
     }
     
-    # --- ラベル層：未対応引数を渡さない（警告回避） ---
-    # 既存の goplot 出力内の Label/Text レイヤがあればサイズだけ上書き
+    # --- Label layer adjustment ---
     for (i in seq_along(p$layers)) {
       lyr <- p$layers[[i]]
       if (inherits(lyr$geom, "GeomLabelRepel") || inherits(lyr$geom, "GeomTextRepel") ||
           inherits(lyr$geom, "GeomLabel")      || inherits(lyr$geom, "GeomText")) {
         lyr$aes_params$size  <- lab_size
         lyr$geom_params$size <- lab_size
-        # 未対応のパラメータは設定しない
         p$layers[[i]] <- lyr
       }
     }
   })
   
-  
   safe_save_png(out_png, p + ggplot2::ggtitle(title), width=6, height=4, dpi=300)
 }
 
-
-
 # ---------------------------
-# 背景（universe）を作る関数
+# Function to build background (universe)
 # ---------------------------
 build_universe_from_mode <- function(mode = BG_MODE,
                                      in_xlsx = IN_XLSX,
@@ -667,7 +658,7 @@ build_universe_from_mode <- function(mode = BG_MODE,
   
   if (mode == "sheet"){
     if (is.null(df_sheet_tair) || !length(df_sheet_tair))
-      stop("[BG] sheet モードですが df_sheet_tair が空です。")
+      stop("[BG] Mode is 'sheet' but df_sheet_tair is empty.")
     bg <- unique(toupper(df_sheet_tair))
     all_tair <- AnnotationDbi::keys(org.At.tair.db, keytype="TAIR")
     return(intersect(bg, all_tair))
@@ -680,11 +671,11 @@ build_universe_from_mode <- function(mode = BG_MODE,
   
   if (mode == "excel_universe"){
     df_u <- tryCatch(readxl::read_excel(in_xlsx, sheet = universe_sheet),
-                     error = function(e){ stop(sprintf("[BG] universe シート読込失敗: %s", e$message)) })
+                     error = function(e){ stop(sprintf("[BG] Failed to read universe sheet: %s", e$message)) })
     if (!(universe_symbol_col %in% names(df_u)))
-      stop(sprintf("[BG] universe シートに '%s' 列が見つかりません。", universe_symbol_col))
+      stop(sprintf("[BG] Column '%s' not found in universe sheet.", universe_symbol_col))
     v <- clean_chr(df_u[[universe_symbol_col]])
-    if (!length(v) || all(is.na(v))) stop("[BG] universe シートの SYMBOL 列が空です。")
+    if (!length(v) || all(is.na(v))) stop("[BG] SYMBOL column in universe sheet is empty.")
     tair_from_agi <- extract_agi_anycase(v)
     need_map <- is.na(tair_from_agi)
     sym_keys <- toupper(trimws(v[need_map]))
@@ -694,10 +685,10 @@ build_universe_from_mode <- function(mode = BG_MODE,
       tair_from_sym[need_map] <- unname(sym2tair[toupper(v[need_map])])
     }
     bg <- unique(na.omit(toupper(dplyr::coalesce(tair_from_agi, tair_from_sym))))
-    if (!length(bg)) stop("[BG] universe シートから TAIR を1つも作れませんでした。")
+    if (!length(bg)) stop("[BG] Could not generate any TAIR IDs from universe sheet.")
     all_tair <- AnnotationDbi::keys(org.At.tair.db, keytype="TAIR")
     bg <- intersect(bg, all_tair)
-    if (!length(bg)) stop("[BG] universe シートの TAIR が org.At に存在しません。")
+    if (!length(bg)) stop("[BG] TAIR IDs from universe sheet do not exist in org.At.")
     return(bg)
   }
 }
@@ -709,20 +700,20 @@ for (sh in SHEETS){
   message("\n==============================\nSheet: ", sh, "\n==============================")
   
   df_raw <- tryCatch(readxl::read_excel(IN_XLSX, sheet=sh),
-                     error=function(e){ warning(sprintf("[%s] 読み込み失敗: %s", sh, e$message)); NULL })
+                     error=function(e){ warning(sprintf("[%s] Read failed: %s", sh, e$message)); NULL })
   if (is.null(df_raw)) next
   
   needed <- c(COL_SYM, COL_LFC)
   miss <- setdiff(needed, names(df_raw))
-  if (length(miss) > 0){ warning(sprintf("[%s] 必要列欠如: %s", sh, paste(miss, collapse=", "))); next }
+  if (length(miss) > 0){ warning(sprintf("[%s] Missing columns: %s", sh, paste(miss, collapse=", "))); next }
   
   df <- df_raw |>
     dplyr::mutate(!!COL_SYM := clean_chr(.data[[COL_SYM]]),
                   !!COL_LFC := suppressWarnings(as.numeric(.data[[COL_LFC]]))) |>
     dplyr::filter(!is.na(.data[[COL_SYM]]))
-  if (!nrow(df)){ warning(sprintf("[%s] SYMBOL 有効行なし", sh)); next }
+  if (!nrow(df)){ warning(sprintf("[%s] No valid SYMBOL rows", sh)); next }
   
-  # --- TAIR マッピング（SYMBOL列にTAIRが入っているケースも対応） ---
+  # --- TAIR Mapping (Handles mixed SYMBOL/TAIR) ---
   df$TAIR_from_AGI <- extract_agi_anycase(df[[COL_SYM]])
   need_map <- is.na(df$TAIR_from_AGI)
   sym_keys <- toupper(trimws(df[[COL_SYM]][need_map]))
@@ -746,13 +737,13 @@ for (sh in SHEETS){
   
   out_dir_sheet <- file.path(OUT_DIR, sh); dir.create(out_dir_sheet, showWarnings=FALSE, recursive=TRUE)
   if (nrow(df) < 10){
-    warning(sprintf("[%s] TAIR マップ数が少ない: %d", sh, nrow(df)))
+    warning(sprintf("[%s] Too few mapped TAIR IDs: %d", sh, nrow(df)))
     utils::write.csv(map_audit, file=file.path(out_dir_sheet, "mapping_audit.csv"), row.names=FALSE)
     next
   }
   message(sprintf("[%s] TAIR mapped: %d", sh, nrow(df)))
   
-  # 背景（universe）
+  # Background (Universe)
   bg_universe <- build_universe_from_mode(
     mode = BG_MODE,
     in_xlsx = IN_XLSX,
@@ -762,7 +753,7 @@ for (sh in SHEETS){
   )
   message(sprintf("[BG] mode=%s | universe size=%d", BG_MODE, length(bg_universe)))
   
-  # Up/Down gene set（背景でフィルタ）
+  # Up/Down gene set (Filtered by universe)
   if (USE_QUANTILE){
     uq <- as.numeric(stats::quantile(df[[COL_LFC]], probs=1 - TOP_PCT/100, na.rm=TRUE))
     dq <- as.numeric(stats::quantile(df[[COL_LFC]], probs=TOP_PCT/100,     na.rm=TRUE))
@@ -776,16 +767,16 @@ for (sh in SHEETS){
   down_genes <- intersect(unique(toupper(down_genes)), bg_universe)
   message(sprintf("[%s] gene sets: Up:%d | Down:%d", sh, length(up_genes), length(down_genes)))
   
-  # 監査ログ
+  # Audit log
   utils::write.csv(map_audit, file=file.path(out_dir_sheet, "mapping_audit.csv"), row.names=FALSE)
   utils::write.csv(data.frame(TAIR=up_genes),   file=file.path(out_dir_sheet, "UP_genes.csv"),   row.names=FALSE)
   utils::write.csv(data.frame(TAIR=down_genes), file=file.path(out_dir_sheet, "DOWN_genes.csv"), row.names=FALSE)
   
-  # --- enrichGO 実行 ---
+  # --- Run enrichGO ---
   ego_up   <- run_enrichGO_TAIR(up_genes,   bg_universe, paste0(sh, "_UP"))
   ego_down <- run_enrichGO_TAIR(down_genes, bg_universe, paste0(sh, "_DOWN"))
   
-  # ---- UP 出力（★ループ内★）----
+  # ---- Output for UP genes ----
   if (!is.null(ego_up)){
     utils::write.csv(as.data.frame(ego_up), file=file.path(out_dir_sheet, paste0("UP_GO_", GO_ONTOLOGY, ".csv")), row.names=FALSE)
     plot_bar_save(ego_up, paste0(sh," (UP) : GO ", GO_ONTOLOGY, " enrichment"),
@@ -804,15 +795,15 @@ for (sh in SHEETS){
     }
   }
   
-  # ---- DOWN 出力（★ループ内★）----
-
+  # ---- Output for DOWN genes (Inside Loop) ----
+  # (Logic for down-regulated genes would typically mirror the UP section above)
   
-  # このシートで作られたファイル一覧を必ずログ
+  
+  # Log files created in this sheet
   created <- try(list.files(out_dir_sheet, full.names = TRUE), silent=TRUE)
   if (!inherits(created, "try-error")) {
-    message("[files] ", out_dir_sheet, " :\n  - ", paste(basename(created), collapse = "\n  - "))
+    message("[files] ", out_dir_sheet, " :\n - ", paste(basename(created), collapse = "\n - "))
   }
 }
 
-cat("完了：", normalizePath(OUT_DIR), "\n")
-
+cat("Completed: ", normalizePath(OUT_DIR), "\n")
