@@ -32,7 +32,7 @@
   - セット比較: PCA/Dendrogram/ヒートマップ PNG、Euler 図 PDF/PNG、交差リスト Excel。
   - snAtlas 再解析: WGCNA 結果 CSV（モジュール相関・Hub 遺伝子・全遺伝子割り当て）、GO 結果 CSV/PDF、擬似バルク CPM 棒グラフ PDF、ドット図/棒グラフ PDF。
 
-## 実行例
+## 実行
 ```bash
 Rscript "3章_IP-MSによるPPI解析/GO analysis.R"
 Rscript "3章_IP-MSによるPPI解析/related paper search.R"
