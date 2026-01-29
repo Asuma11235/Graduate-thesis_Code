@@ -37,6 +37,19 @@
   - WGCNA のモジュール相関・Hub 遺伝子 CSV、GO 結果 CSV/PDF、擬似バルク発現の図（棒・ドット・バイオリン・時系列）
   - 検定系: Binomial/Fisher の検定結果 CSV、Monocle3 の擬似時間図
 
+## 第５章で使用したデータセット
+- `Guo et al.,2025` - `"An Arabidopsis single-nucleus atlas decodes leaf senescence and nutrient allocation"`
+- DOI: `10.1016/j.cell.2025.03.024`
+- `Cell 188, 2856–2871.e1–e6, May 29, 2025`
+- Publication History:
+  - Received `October 15, 2023`; 
+  - Revised `July 30, 2024`; 
+  - Accepted `March 12, 2025`; 
+  - Published online `April 11, 2025`
+- 本論文が提供している，Seuratによるアノテーション済みRDSファイルを用いて解析を行った．
+  - データ元： `https://ftp.cngb.org/pub/CNSA/ data6/CNP0002614/Other/`
+
+
 ## コード一覧（簡易解説）
 - IP-MS 系: `GO analysis.R`, `Euler Diagram.R`, `Euler list.R`, `related paper search.R`
 - AirID 系: `GO analysis.R`, `PCA & Hierarchical Clustering Analysis.R`, `PCA Analysis(4 Conditions).R`, `PCA Analysis.R`, `Hierarchical Clustering Heatmap.R`, `Pseudo-Volcano Plot (Bikinin vs. Mock|DMSO vs. Mock|Bikinin vs. DMSO).R`, `Volcano Plot.R`, `Euler Diagram.R`, `Euler list.R`, `Fisher's Exact Test for Set Overlap.R`
